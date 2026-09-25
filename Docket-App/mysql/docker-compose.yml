@@ -1,16 +1,65 @@
-version: "3.8"
+# MySQL 8 (8.4 LTS) - local development, production-like
+# Start:  docker compose up -d        (from this folder)
+name: local-mysql
+
 services:
   mysql:
-    image: mysql:5.7
+    image: mysql:${MYSQL_VERSION:-8.4}
+    container_name: local-mysql
     restart: unless-stopped
-    container_name: mysql-container
-    ports:
-        - "3306:3306"
     environment:
-        MYSQL_USER: admin
-        MYSQL_PASSWORD: password
-        MYSQL_ROOT_PASSWORD: password
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      MYSQL_ROOT_HOST: "%"                     # root can log in from any host (DBeaver, apps, other containers)
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-default_database}
+      TZ: ${TZ:-UTC}
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${MYSQL_PORT:-3306}:3306"
     volumes:
-        - mysql_data:/var/lib/mysql
+      - mysql_data:/var/lib/mysql              # persistent data
+      - ./init:/docker-entrypoint-initdb.d:ro  # runs ONLY on first start (empty volume)
+      - ./dumps:/dumps                         # drop dump files here to import them
+      - ./scripts:/scripts:ro                  # helper: clean-dump.sh
+    # Server settings are passed as flags (not a mounted my.cnf) so they always apply -
+    # MySQL silently ignores world-writable config files, which is common with Windows mounts.
+    # "--loose-" = ignore the option instead of failing if a future version drops it.
+    command:
+      # utf8mb4 everywhere (emoji-safe, modern default)
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      # Binary log OFF locally: removes "ERROR 1419 ... SUPER privilege and binary logging is
+      # enabled" when importing procedures/functions/triggers, and speeds up big imports.
+      - --disable-log-bin
+      - --loose-log-bin-trust-function-creators=1
+      # Large dumps / bulk loads
+      - --max-allowed-packet=1G
+      - --local-infile=ON
+      - --innodb-redo-log-capacity=1G
+      - --net-read-timeout=600
+      - --net-write-timeout=600
+      # Memory / connections - tune to your machine
+      - --innodb-buffer-pool-size=${MYSQL_BUFFER_POOL:-1G}
+      - --max-connections=300
+      # Behaviour
+      - --skip-name-resolve
+      - --default-time-zone=+00:00
+      - --slow-query-log=ON
+      - --long-query-time=1
+      # sql_mode stays at MySQL's STRICT default to match production.
+    cap_add:
+      - SYS_NICE                               # silences "mbind: Operation not permitted"
+    ulimits:
+      nofile: { soft: 65535, hard: 65535 }
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
 volumes:
   mysql_data:
+    name: local_mysql_data
+
+networks:
+  default:
+    name: local-databases

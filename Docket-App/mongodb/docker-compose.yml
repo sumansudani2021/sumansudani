@@ -1,0 +1,67 @@
+# MongoDB 8 - local development, production-like
+# Runs as a single-node REPLICA SET (rs0) with authentication, so that
+# transactions, change streams and tools like Prisma work exactly as in production.
+# Start:  docker compose up -d        (from this folder)
+name: local-mongodb
+
+services:
+  mongodb:
+    image: mongo:${MONGO_VERSION:-8.0}
+    container_name: local-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-root}   # created in "admin" with the built-in "root" role
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-root}
+      MONGO_INITDB_DATABASE: ${MONGO_DATABASE:-default_database}
+      TZ: ${TZ:-UTC}
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${MONGO_PORT:-27017}:27017"
+    volumes:
+      - mongo_data:/data/db
+      - mongo_config:/data/configdb
+      - ./init:/docker-entrypoint-initdb.d:ro   # runs ONLY on first start (empty volume)
+      - ./dumps:/dumps                          # drop dump files here to restore them
+    # A replica set with auth needs a keyFile owned by the mongodb user with mode 400.
+    # Generating it inside the container on every start avoids all host file-permission
+    # problems (Windows/macOS mounts can't set 400 / uid 999 correctly).
+    entrypoint:
+      - bash
+      - -c
+      - |
+        head -c 756 /dev/urandom | base64 -w 0 > /etc/mongo-keyfile
+        chmod 400 /etc/mongo-keyfile
+        chown mongodb:mongodb /etc/mongo-keyfile
+        exec docker-entrypoint.sh "$$@"
+      - --
+    command:
+      - mongod
+      - --replSet
+      - rs0
+      - --keyFile
+      - /etc/mongo-keyfile
+      - --bind_ip_all
+      - --wiredTigerCacheSizeGB
+      - "${MONGO_CACHE_GB:-1}"
+    # The healthcheck also initiates the replica set on first start (idempotent),
+    # then only reports healthy once this node is PRIMARY (writable).
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >
+          mongosh --quiet --host localhost --port 27017
+          -u "$$MONGO_INITDB_ROOT_USERNAME" -p "$$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin
+          --eval "try { rs.status() } catch (e) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'localhost:27017'}]}) }; if (!db.hello().isWritablePrimary) quit(1)"
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 40s
+
+volumes:
+  mongo_data:
+    name: local_mongo_data
+  mongo_config:
+    name: local_mongo_config
+
+networks:
+  default:
+    name: local-databases

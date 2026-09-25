@@ -1,0 +1,72 @@
+# PostgreSQL 18 - local development, production-like
+# Start:  docker compose up -d        (from this folder)
+name: local-postgres
+
+services:
+  postgres:
+    image: postgres:${POSTGRES_VERSION:-18}
+    container_name: local-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-root}              # created as SUPERUSER
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-root}
+      POSTGRES_DB: ${POSTGRES_DB:-default_database}      # owned by POSTGRES_USER
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C.UTF-8 --data-checksums"
+      # Defaults for psql / pg_dump / pg_restore run INSIDE the container,
+      # so `psql` alone connects as root to default_database (not to a missing "root" DB).
+      PGUSER: ${POSTGRES_USER:-root}
+      PGDATABASE: ${POSTGRES_DB:-default_database}
+      TZ: ${TZ:-UTC}
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # PostgreSQL 18+ images keep data in /var/lib/postgresql/<major>/docker,
+      # so the volume is mounted at /var/lib/postgresql (NOT .../data as in <=17).
+      # This also makes future major-version upgrades (pg_upgrade --link) possible.
+      - postgres_data:/var/lib/postgresql
+      - ./init:/docker-entrypoint-initdb.d:ro            # runs ONLY on first start (empty volume)
+      - ./dumps:/dumps                                   # drop dump files here to import them
+    shm_size: 1gb                                        # needed for parallel queries / pg_restore -j
+    command:
+      - postgres
+      # Memory - tune to your machine
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-512MB}
+      - -c
+      - effective_cache_size=2GB
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=512MB        # faster index builds during restores
+      # Connections
+      - -c
+      - max_connections=200
+      # WAL / checkpoints - smoother bulk loads
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - checkpoint_timeout=15min
+      # Query statistics (see init/01-init.sql)
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+      # Logging: slow queries (> 500 ms)
+      - -c
+      - log_min_duration_statement=500
+      - -c
+      - timezone=UTC
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  postgres_data:
+    name: local_postgres_data
+
+networks:
+  default:
+    name: local-databases
